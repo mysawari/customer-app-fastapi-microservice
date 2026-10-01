@@ -339,19 +339,18 @@ def blur_plate(image_bytes):
     if img is None:
         raise ValueError("Invalid image")
 
+    # Downsample high-resolution images BEFORE inference to prevent Out Of Memory (OOM) on Render
+    max_dim = 1200
+    h, w = img.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / float(max(h, w))
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
     with model_lock:
         plates = select_plates(find_plates(img))
 
     for x1, y1, x2, y2, _, _ in plates:
         hide_region(img, x1, y1, x2, y2)
-
-    # To guarantee fast loading on mobile, cap the maximum width to 1200px (Retina mobile quality)
-    # This prevents the app from struggling with raw 4K photos.
-    max_width = 1200
-    if img.shape[1] > max_width:
-        scale = max_width / img.shape[1]
-        new_dim = (max_width, int(img.shape[0] * scale))
-        img = cv2.resize(img, new_dim, interpolation=cv2.INTER_AREA)
 
     # Encode back to JPEG with 80% quality to ensure fast network loading
     success, buffer = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
