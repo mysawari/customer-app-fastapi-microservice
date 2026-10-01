@@ -358,22 +358,34 @@ def _download_image(url):
     parsed = urlparse(url)
     if parsed.scheme not in ('http', 'https') or not parsed.hostname:
         raise HTTPException(status_code=400, detail="Invalid image URL")
-    with requests.get(url, headers={'User-Agent': 'MySawariImageService/1.0'}, timeout=10,
-                      stream=True, allow_redirects=True) as response:
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Failed to fetch input image")
-        content_type = response.headers.get('content-type', '')
-        if content_type and not content_type.lower().startswith('image/'):
-            raise HTTPException(status_code=400, detail="Input is not an image")
-        declared = int(response.headers.get('content-length') or 0)
-        if declared > MAX_DOWNLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="Image too large")
-        data = bytearray()
-        for chunk in response.iter_content(64 * 1024):
-            data.extend(chunk)
-            if len(data) > MAX_DOWNLOAD_BYTES:
+    
+    # Cloud microservices cannot access localhost/loopback addresses
+    is_cloud = os.environ.get('RENDER') or os.environ.get('PORT')
+    if is_cloud and parsed.hostname in ('localhost', '127.0.0.1', '0.0.0.0', '10.0.2.2'):
+        print(f"Refusing to fetch loopback address in cloud environment: {url}")
+        raise HTTPException(status_code=400, detail=f"Cannot fetch from local/private host: {parsed.hostname}")
+
+    try:
+        with requests.get(url, headers={'User-Agent': 'MySawariImageService/1.0'}, timeout=15,
+                          stream=True, allow_redirects=True) as response:
+            if response.status_code != 200:
+                print(f"Image download HTTP error {response.status_code} for URL: {url}")
+                raise HTTPException(status_code=400, detail=f"Failed to fetch image: HTTP {response.status_code}")
+            content_type = response.headers.get('content-type', '')
+            if content_type and not content_type.lower().startswith('image/'):
+                raise HTTPException(status_code=400, detail="Input is not an image")
+            declared = int(response.headers.get('content-length') or 0)
+            if declared > MAX_DOWNLOAD_BYTES:
                 raise HTTPException(status_code=413, detail="Image too large")
-    return bytes(data)
+            data = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                data.extend(chunk)
+                if len(data) > MAX_DOWNLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="Image too large")
+        return bytes(data)
+    except requests.exceptions.RequestException as e:
+        print(f"Network error downloading image from {url}: {type(e).__name__} - {e}")
+        raise HTTPException(status_code=400, detail=f"Could not reach image host: {type(e).__name__}")
 
 
 @app.post("/process")
@@ -381,9 +393,11 @@ def process_image(request: ImageProcessRequest, x_service_token: Optional[str] =
     if SERVICE_TOKEN and not hmac.compare_digest(x_service_token or '', SERVICE_TOKEN):
         raise HTTPException(status_code=401, detail="Not authorized")
     try:
-        # The Android app sends URLs with 10.0.2.2 (Emulator's alias for host).
-        # Since this service runs on the host, we must translate it to 127.0.0.1.
-        image_url = request.input.replace("10.0.2.2", "127.0.0.1")
+        # If running locally (not in cloud), translate Android emulator 10.0.2.2 to 127.0.0.1
+        image_url = request.input
+        if not os.environ.get('RENDER') and '10.0.2.2' in image_url:
+            image_url = image_url.replace("10.0.2.2", "127.0.0.1")
+
         content = _download_image(image_url)
 
         # Plates are always hidden: this service never hands back an unprocessed original.
@@ -397,7 +411,7 @@ def process_image(request: ImageProcessRequest, x_service_token: Optional[str] =
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error processing image: {type(e).__name__}")
+        print(f"Error processing image {request.input}: {type(e).__name__} - {e}")
         raise HTTPException(status_code=500, detail="Image processing failed")
 
 
