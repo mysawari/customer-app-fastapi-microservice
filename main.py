@@ -247,40 +247,27 @@ def find_plates(img):
     h, w = img.shape[:2]
     found = []
 
-    # 1. The whole photo, with test-time augmentation (flips / scales) for extra recall.
-    for box, conf in _detect_plates(img, 1280, augment=True):
+    # 1. Fast direct pass at standard 640px
+    for box, conf in _detect_plates(img, 640, augment=False, conf_threshold=MIN_CONF):
         found.append((*box, conf, 'full'))
 
-    # 2. Zoomed out: the photo placed in the middle of a larger canvas.
-    f = 2.5
-    ch, cw = int(h * f), int(w * f)
-    oy, ox = (ch - h) // 2, (cw - w) // 2
-    canvas = np.full((ch, cw, 3), 127, np.uint8)
-    canvas[oy:oy + h, ox:ox + w] = img
-    for (x1, y1, x2, y2), conf in _detect_plates(canvas, 1280):
-        found.append((x1 - ox, y1 - oy, x2 - ox, y2 - oy, conf, 'zoom_out'))
+    # If confident plate is already found, return immediately for instant response
+    if any(f[4] >= SURE_CONF for f in found):
+        return found
 
-    # 3. Zoomed in on every vehicle.
-    vr = vehicle_model.predict(img, conf=0.25, classes=VEHICLE_CLASSES, verbose=False)[0]
-    for b in vr.boxes:
-        cls = int(b.cls[0])
-        is_bike = (cls == 3)
-
-        x1, y1, x2, y2 = map(int, b.xyxy[0])
-        px, py = int((x2 - x1) * 0.1), int((y2 - y1) * 0.1)
-        x1, y1, x2, y2 = max(0, x1 - px), max(0, y1 - py), min(w, x2 + px), min(h, y2 + py)
-        crop = img[y1:y2, x1:x2]
-        if crop.size == 0 or min(crop.shape[:2]) < 32:
-            continue
-
-        if is_bike:
-            # Dedicated multi-strategy bike pipeline
-            found.extend(_find_bike_plates(crop, x1, y1))
-        else:
-            # Standard car/bus/truck detection
-            crop_found = _detect_plates(crop, 960, conf_threshold=MIN_CONF)
+    # 2. Focused vehicle sub-crop pass only if direct pass didn't find confident plates
+    try:
+        vr = vehicle_model.predict(img, conf=0.3, imgsz=640, classes=VEHICLE_CLASSES, verbose=False)[0]
+        for b in vr.boxes:
+            x1, y1, x2, y2 = map(int, b.xyxy[0])
+            crop = img[y1:y2, x1:x2]
+            if crop.size == 0 or min(crop.shape[:2]) < 32:
+                continue
+            crop_found = _detect_plates(crop, 640, augment=False, conf_threshold=MIN_CONF)
             for (a, b_, c, d), conf in crop_found:
                 found.append((a + x1, b_ + y1, c + x1, d + y1, conf, 'vehicle'))
+    except Exception as e:
+        print(f"Vehicle crop detection skipped: {e}")
 
     return found
 
@@ -372,7 +359,7 @@ def _download_image(url):
     if parsed.scheme not in ('http', 'https') or not parsed.hostname:
         raise HTTPException(status_code=400, detail="Invalid image URL")
     with requests.get(url, headers={'User-Agent': 'MySawariImageService/1.0'}, timeout=10,
-                      stream=True, allow_redirects=False) as response:
+                      stream=True, allow_redirects=True) as response:
         if response.status_code != 200:
             raise HTTPException(status_code=400, detail="Failed to fetch input image")
         content_type = response.headers.get('content-type', '')
