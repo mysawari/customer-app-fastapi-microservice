@@ -394,11 +394,16 @@ def process_image(request: ImageProcessRequest, x_service_token: Optional[str] =
         raise HTTPException(status_code=401, detail="Not authorized")
     try:
         # If running locally (not in cloud), translate Android emulator 10.0.2.2 to 127.0.0.1
-        image_url = request.input
-        if not os.environ.get('RENDER') and '10.0.2.2' in image_url:
-            image_url = image_url.replace("10.0.2.2", "127.0.0.1")
-
-        content = _download_image(image_url)
+        input_data = request.input
+        if input_data.startswith("data:image/"):
+            import base64
+            _, encoded = input_data.split(",", 1)
+            content = base64.b64decode(encoded)
+        else:
+            image_url = input_data
+            if not os.environ.get('RENDER') and '10.0.2.2' in image_url:
+                image_url = image_url.replace("10.0.2.2", "127.0.0.1")
+            content = _download_image(image_url)
 
         # Plates are always hidden: this service never hands back an unprocessed original.
         nparr = np.frombuffer(content, np.uint8)
